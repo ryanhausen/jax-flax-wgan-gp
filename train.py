@@ -13,9 +13,10 @@ import numpy as np
 import optax as opt
 from flax.training.train_state import TrainState
 from scipy import rand
+from tqdm import tqdm
 
 from model import Discriminator, Generator
-
+import data_provider as dp
 
 def config_str_to_dict(config_str: str) -> dict:
     """Converts a Gin.config_str() to a dict for logging with comet.ml"""
@@ -102,14 +103,97 @@ def training_step(g_state:TrainState, d_state:TrainState, update_gen:bool, batch
     dsc_real = Discriminator().apply({"params":d_state.params}, real)
     dsc_fake = Discriminator().apply({"params":d_state.params}, fake)
 
-
     dsc_grad_fn = jax.value_and_grad(fun=discriminator_loss_fn)
     d_loss, d_grads = dsc_grad_fn(d_state.params, g_state.params, rng, batch)
     d_state = d_state.apply_gradients(grads=d_grads)
+
+    metrics = dict(
+        avg_real = dsc_real.mean(),
+        avg_fake = dsc_fake.mean(),
+        d_loss = d_loss,
+    )
 
     if update_gen:
         gen_grad_fn = jax.value_and_grad(fun=generator_loss_fn)
         g_loss, g_grads = gen_grad_fn(g_state.params, d_state.params, batch)
         g_state = g_state.apply_gradients(grads=g_grads)
+        metrics["g_loss"] = g_loss
 
     return g_state, d_state, metrics
+
+
+@jax.jit
+def test_step(g_state, d_state, batch, rng):
+    real = batch["real"]
+    fake = Generator().apply({"params":g_state.params}, batch["z"])
+
+    dsc_real = Discriminator().apply({"params":d_state.params}, real)
+    dsc_fake = Discriminator().apply({"params":d_state.params}, fake)
+
+    d_loss = discriminator_loss_fn(d_state.params, g_state.params, rng, batch)
+    g_loss = generator_loss_fn(g_state.params, d_state.params, batch)
+
+    metrics = dict(
+        avg_real = dsc_real.mean(),
+        avg_fake = dsc_fake.mean(),
+        d_loss = d_loss,
+        g_loss = g_loss,
+    )
+
+    return metrics
+
+def log_metrics(experiment:comet_ml.Experiment, metrics:Dict, step:int):
+    pass
+
+def train_epoch(experiment, g_state, d_state, n_steps_per_gen_update, epoch, data, rng, step):
+
+    for i, batch in tqdm(
+        zip(range(data.batches_per_epoch), data),
+        total=data.batches_per_epoch,
+        desc=f"Epoch {epoch}",
+    ):
+        do_gen_update = step % n_steps_per_gen_update == 0
+        g_state, d_state, metrics = training_step(
+            g_state,
+            d_state,
+            do_gen_update,
+            batch,
+            rng,
+        )
+
+        rng, _ = jax.random.split(rng)
+
+        if i % 100 == 0:
+            log_metrics(experiment, metrics, step)
+
+        step += 1
+
+    return g_state, d_state, rng, step
+
+
+@gin.configurable
+def main(num_epochs: int, seed: int, tags=[]):
+
+    experiment = comet_ml.Experiment(
+        api_key=os.getenv("COMET_KEY"),
+        project_name="fft-gan",
+        workspace="ryanhausen",
+        auto_metric_logging=False,
+        disabled=True,
+    )
+    experiment.add_tags(tags)
+    experiment.log_parameters(config_str_to_dict(gin.config_str(max_line_length=1000)))
+
+    rng = random.PRNGKey(seed)
+
+    training_data, testing_data = dp.get_dataset()
+
+    g_state, d_state = create_training_state(rng)
+
+    step = 1
+    for epoch in range(1, num_epochs + 1):
+        rng, _ = random.split(rng)
+
+        g_state, d_state, rng, step = train_epoch(
+            experiment, g_state, d_state, epoch, training_data, rng, step
+        )
