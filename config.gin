@@ -1,0 +1,17 @@
+get_dataset.batch_size = 16
+get_dataset.z_dim = 256
+
+gen/optax.adam.learning_rate = 0.0001
+gen/optax.adam.b1 = 0.0
+gen/optax.adam.b2 = 0.9
+
+dsc/optax.adam.learning_rate = 0.0001
+dsc/optax.adam.b1 = 0.0
+dsc/optax.adam.b2 = 0.9
+
+discriminator_loss_fn.lambda_gp = 10
+
+__main__.create_training_state.generator_optimizer = @gen/adam()
+__main__.create_training_state.discriminator_optimizer = @dsc/adam()
+__main__.main.num_epochs = 1000
+__main__.main.n_steps_per_gen_update = 5
